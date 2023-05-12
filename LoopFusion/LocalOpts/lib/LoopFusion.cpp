@@ -42,6 +42,66 @@ bool LoopFusionPass::areLoopsAdjacent(BasicBlock * exitBlockL1, BasicBlock * pre
 	return false;
 }
 
+// Ritorna true se i trip count dei due loop sono uguali, false se sono diversi o non calcolabili
+bool LoopFusionPass::sameTripCount(Loop * L1, Loop * L2, ScalarEvolution &SE)
+{
+	const SCEV* tripCountL1 = SE.getBackedgeTakenCount(L1);
+	const SCEV* tripCountL2 = SE.getBackedgeTakenCount(L2);
+
+	// Controlla che il trip count tra i due loop sia calcolabile e che sia uguale
+	if ((!isa<SCEVCouldNotCompute>(tripCountL1)) && (!isa<SCEVCouldNotCompute>(tripCountL2)) && (tripCountL1 == tripCountL2))
+		return true;
+
+	return false;
+}
+
+// Ritorna true se i bound dei due loop sono uguali, false altrimenti
+bool LoopFusionPass::sameBounds(Loop * L1, Loop * L2, ScalarEvolution &SE)
+{
+	Optional<Loop::LoopBounds> boundsL1 = L1->getBounds(SE);
+
+	//TODO: Da rivedere
+
+	//outs()<<"VALORE INIZIALE: "<<boundsL1.hasValue();
+	//ConstantInt *initialValue = dyn_cast<ConstantInt>(&boundsL1->getInitialIVValue());
+	//outs()<<*initialValue<<"\n";
+
+	//if(ConstantInt *initialValue = dyn_cast<ConstantInt>(&boundsL1->getInitialIVValue()))
+		//outs()<<"OK\n";
+	//else
+		//outs()<<"NO\n";
+
+	//if (initialValue->isZero())
+		//outs()<<"ZERO\n";
+	//outs()<<"SAME BOUNDS: "<<(*bounds).getInitialIVValue();
+
+	//outs()<<"SAME BOUNDS: "<<(*(*L1).LoopBounds).getInitialIVValue();
+	//ConstantInt *InitialIVValue = dyn_cast<ConstantInt>(&bounds->getInitialIVValue());
+	//outs()<<"SAME BOUNDS: "<<InitialIVValue;
+	return true;
+}
+
+// Due Loop sono Control-Flow Equivalent se l'esecuzione di uno assicura l'esecuzione dell'altro.
+//  Per verificare che due loop siano Control-Flow Equivalent si usa l'analisi dei dominatori e
+//   dei post-dominatori:
+//    Se il Loop j domina il Loop k, e il Loop k post-domina il loop j
+//     ---> i due Loop sono Control-Flow Equivalent
+
+// Dominator: un nodo x domina un nodo y se ogni percorso dall'entry block a y contiene x
+// Post-dominator: un nodo y post-domina un nodo x se ogni percorso da x all'uscita contiene y
+// ----------------------------------------------------------------------------------------------
+// Ritorna true se i loop sono Control-Flow Equicalent, false altrimenti
+bool LoopFusionPass::areLoopsControlFlowEquivalent(Loop * L1, Loop * L2, DominatorTree * DT, PostDominatorTree *PDT)
+{
+	// Se IterLoop1 domina IterLoop2 e se IterLoop2 post-domina IterLoop1 sono Control-Flow Equivalent
+	if ((*DT).dominates((*L1).getLoopPreheader(), (*L2).getLoopPreheader()) 
+		&& (*PDT).dominates((*L2).getLoopPreheader(), (*L1).getLoopPreheader())) 
+		return true;
+
+	return false;
+}
+
+
 llvm::PreservedAnalyses LoopFusionPass::run([[maybe_unused]] Function &F, FunctionAnalysisManager &FAM) 
 {
 	auto &LI = FAM.getResult<LoopAnalysis>(F);
@@ -66,72 +126,26 @@ llvm::PreservedAnalyses LoopFusionPass::run([[maybe_unused]] Function &F, Functi
 				{
 					outs()<<"I Loop:\n"<<*IterLoop1<<*IterLoop2<<" sono adiacenti\n----------------------\n";
 					
-					const SCEV* tripCountL1 = SE.getBackedgeTakenCount(IterLoop1);
-					const SCEV* tripCountL2 = SE.getBackedgeTakenCount(IterLoop2);
-					
-					// Controlla che il trip count tra i due loop sia calcolabile e che sia uguale
-					if ((!isa<SCEVCouldNotCompute>(tripCountL1)) && (!isa<SCEVCouldNotCompute>(tripCountL2)) && (tripCountL1 == tripCountL2))
+					if (sameTripCount(IterLoop1, IterLoop2, SE) && sameBounds(IterLoop1, IterLoop2, SE))
 					{
 						outs()<<"I Loop:\n"<<*IterLoop1<<*IterLoop2<<" hanno lo stesso trip count\n----------------------\n";
 
 						// TODO : CONTROLLARE CHE I BOUND DEI DUE LOOP SIANO UGUALI (MAGARI ANCHE LE VARIABILI D'INDUZIONE?)
 
-						// Due Loop sono Control-Flow Equivalent se l'esecuzione di uno assicura l'esecuzione dell'altro.
-						//  Per verificare che due loop siano Control-Flow Equivalent si usa l'analisi dei dominatori e
-						//   dei post-dominatori:
-						//    Se il Loop j domina il Loop k, e il Loop k post-domina il loop j
-						//     ---> i due Loop sono Control-Flow Equivalent
-
-						// Dominator: un nodo x domina un nodo y se ogni percorso dall'entry block a y contiene x
-						// Post-dominator: un nodo y post-domina un nodo x se ogni percorso da x all'uscita contiene y
-
-						// Se IterLoop1 domina IterLoop2 e se IterLoop2 post-domina IterLoop1 sono Control-Flow Equivalent
-						if ((*DT).dominates((*IterLoop1).getLoopPreheader(), (*IterLoop2).getLoopPreheader()) 
-							&& (*PDT).dominates((*IterLoop2).getLoopPreheader(), (*IterLoop1).getLoopPreheader()))
+						// Se i due loop sono Control-Flow Equivalent
+						if (areLoopsControlFlowEquivalent(IterLoop1, IterLoop2, DT, PDT))
 						{
 							outs()<<"Ho trovato due loop Control-Flow Equivalent:\n";
 							outs()<<"Il Loop: "<<*IterLoop1<<" domina ---> "<<*IterLoop2<<"\n";
-							outs()<<"Il Loop: "<<*IterLoop2<<" post-domina ---> "<<*IterLoop1<<"\n";
-							
-							/*
-							// PROBABILMENTE DA NON FARE (?)
-							
-							//4) There cannot be any negative distance dependencies between the loops. 
-							//    If all of these conditions are satisfied, it is safe to fuse the loops.
-							// 	   There cannot be any negative distance dependencies between Lj and Lk
-							//	    A negative distance dependence occurs between Lj and Lk, Lj before Lk, 
-							//   	 when at iteration m Lk uses a value
-							//		  that is computed by Lj at a future iteration m+n (where n > 0)
-
-							// Use SCEV to determine if there could be negative dependencies between the two loops
-
-							bool HasNegativeDependencies = false;
-
-							if (!SE->isLoopInvariant(tripCountL1) && !SE->isLoopInvariant(tripCountL2)) 
-							{
-								if (SE->hasComputableLoopEvolution(tripCountL1) && SE->hasComputableLoopEvolution(tripCountL2)) 
-								{
-									// !!!!! Calcolo del delta per verificare se ci siano dipendenze negative tra le induction variable dei due loop 
-									const SCEV *Delta = SE->getMinusSCEV(inductionVarL1, inductionVarL2);
-									if (!SE->isLoopInvariant(Delta)) 
-									{
-										HasNegativeDependencies = true;
-									}
-								}
-							}
-
-							// Se i due loop non hanno dipendenze negative
-							if (!HasNegativeDependencies) 
-							{
-								
-							} 
-							*/
+							outs()<<"Il Loop: "<<*IterLoop2<<" post-domina ---> "<<*IterLoop1<<"----------------------\n";
 						}		
 					}
 				}			
 			}
 		}
 	}
+
+	loops.clear();
   	return PreservedAnalyses::none();
 }
 
